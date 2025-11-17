@@ -2,72 +2,79 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression
 
-def fill_linear_multi_iter(df, target_col, feature_cols, max_iter=20):
-    """
-    Итеративно заполняет пропуски в target_col по нескольким признакам feature_cols.
-    Останавливается, если новые значения не появляются или достигнут лимит итераций.
-    """
-    df = df.copy()
-    for _ in range(max_iter):
-        na_before = df[target_col].isna().sum()
-        mask_train = df[target_col].notnull() & df[feature_cols].notnull().all(axis=1)
-        if mask_train.sum() < 2:
-            break
-        X_train = df.loc[mask_train, feature_cols]
-        y_train = df.loc[mask_train, target_col]
-        model = LinearRegression()
-        model.fit(X_train, y_train)
-        # Ищем, где можем восстановить target_col (есть все признаки, а target_col пустой)
-        mask_missing = df[target_col].isnull() & df[feature_cols].notnull().all(axis=1)
-        if mask_missing.sum() == 0:
-            break
-        X_missing = df.loc[mask_missing, feature_cols]
-        df.loc[mask_missing.index, target_col] = model.predict(X_missing)
-        na_after = df[target_col].isna().sum()
-        if na_after == 0 or na_after == na_before:
-            break
-    return df
+def neighbors_window(arr, i, window=2):
+    n = len(arr)
+    neighbors = []
+    for w in range(1, window+1):
+        if i-w >= 0 and not pd.isnull(arr[i-w]):
+            neighbors.append(arr[i-w])
+    for w in range(1, window+1):
+        if i+w < n and not pd.isnull(arr[i+w]):
+            neighbors.append(arr[i+w])
+    return neighbors
 
-def zet_fill_simple(df, col):
-    """
-    Заполняет пропуски в 'col' только по значениям верхнего и нижнего соседа (i-1, i+1).
-    Если оба соседа заполнены:
-      - Для числовых признаков — берёт среднее.
-      - Для категориальных — берёт моду (или первого соседа при проблеме).
-    Все остальные пропуски должны быть заполнены по другим правилам отдельно.
-    """
+def zet_fill_window(df, col, window=2, min_neighbors=1):
     df = df.copy()
     arr = df[col].values.copy()
     is_numtype = pd.api.types.is_numeric_dtype(df[col])
     n = len(arr)
+    changed = False
     for i in range(n):
         if pd.isnull(arr[i]):
-            neighbors = []
-            # Верхний сосед
-            if i > 0 and not pd.isnull(arr[i-1]):
-                neighbors.append(arr[i-1])
-            # Нижний сосед
-            if i < n-1 and not pd.isnull(arr[i+1]):
-                neighbors.append(arr[i+1])
-            if len(neighbors) == 2:
+            neighbors = neighbors_window(arr, i, window=window)
+            if len(neighbors) >= min_neighbors:
                 if is_numtype:
-                    try:
-                        arr[i] = np.mean([float(x) for x in neighbors])
-                    except Exception:
-                        pass
+                    arr[i] = np.mean([float(x) for x in neighbors])
                 else:
-                    try:
-                        arr[i] = pd.Series(neighbors).mode()[0]
-                    except Exception:
-                        arr[i] = neighbors[0]
+                    mode = pd.Series(neighbors).mode()
+                    arr[i] = mode.iloc[0] if not mode.empty else neighbors[0]
+                changed = True
     df[col] = arr
+    return df, changed  # return also "changed"!
+
+def add_window_features(df, col, window=2):
+    feats = pd.DataFrame(index=df.index)
+    arr = df[col].values
+    for w in range(1, window+1):
+        feats[f"{col}_prev{w}"] = pd.Series(arr).shift(w)
+        feats[f"{col}_next{w}"] = pd.Series(arr).shift(-w)
+    return feats
+
+def fill_linear_window_multi_iter(df, target_col, feature_cols, window=2, min_filled=5, max_iter=20):
+    df = df.copy()
+    window_feats = add_window_features(df, target_col, window)
+    full_features = pd.concat([df[feature_cols], window_feats], axis=1)
+
+    for _ in range(max_iter):
+        na_before = df[target_col].isna().sum()
+        mask_train = (
+            df[target_col].notnull() & (full_features.notnull().sum(axis=1) >= min_filled)
+        )
+        if mask_train.sum() < 2:
+            break
+        X_train = full_features.loc[mask_train]
+        y_train = df.loc[mask_train, target_col]
+        X_train = X_train.fillna(X_train.mean())
+        model = LinearRegression()
+        model.fit(X_train, y_train)
+
+        mask_missing = (
+            df[target_col].isnull() & (full_features.notnull().sum(axis=1) >= min_filled)
+        )
+        if mask_missing.sum() == 0:
+            break
+        X_missing = full_features.loc[mask_missing]
+        X_missing = X_missing.fillna(X_train.mean())
+        new_values = model.predict(X_missing)
+        # set only those that are still missing!
+        df.loc[mask_missing.index, target_col] = new_values
+        na_after = df[target_col].isna().sum()
+        # if nothing changed, exit
+        if na_after == na_before:
+            break
     return df
 
 def fill_remaining_gaps(df, fill_strategy="mean", cols=None):
-    """
-    Заполняет любые оставшиеся пропуски в указанных столбцах (или во всех, если не указаны)
-    с помощью среднего/моды по уже заполненным значениям.
-    """
     df = df.copy()
     if cols is None:
         cols = df.columns
@@ -80,7 +87,8 @@ def fill_remaining_gaps(df, fill_strategy="mean", cols=None):
         elif is_numtype and fill_strategy == "median":
             fill_value = df[col].dropna().median()
         else:
-            fill_value = df[col].dropna().mode()[0] if not df[col].dropna().mode().empty else None
+            mode = df[col].dropna().mode()
+            fill_value = mode[0] if not mode.empty else None
         df[col] = df[col].fillna(fill_value)
     return df
 
@@ -98,28 +106,31 @@ if __name__ == "__main__":
         "Стоимость",
         "Банк_код"
     ]
+    window = 2
+    min_neighbors = 1
+    min_filled = 5
+    n_rounds = 10
 
-    # 1. Zet-алгоритм для каждого признака
-    for col in features:
-        df = zet_fill_simple(df, col)
+    # 1. Zet-алгоритм для всех признаков сразу (итеративно)
+    for _ in range(n_rounds):
+        changed_any = False
+        for col in features:
+            df, changed = zet_fill_window(df, col, window=window, min_neighbors=min_neighbors)
+            changed_any = changed_any or changed
+        if not changed_any:
+            break
 
-    # 2. Восстанавливаем сначала строки с одним пробелом для каждого признака
-    for target in features:
-        df_one_empty = df[df[target].isna() & df[[f for f in features if f != target]].notnull().all(axis=1)]
-        if not df_one_empty.empty:
-            df.loc[df_one_empty.index, :] = fill_linear_multi_iter(
-                df_one_empty, target, [f for f in features if f != target]
-            )
+    # 2. Регрессия для всех признаков по всему df, а не по подмножеству!
+    for _ in range(n_rounds):
+        changed_any = False
+        na_sum_before = df[features].isna().sum().sum()
+        for target in features:
+            other_feats = [f for f in features if f != target]
+            df2 = fill_linear_window_multi_iter(df, target, other_feats, window=window, min_filled=min_filled)
+            df[target] = df2[target]
+        na_sum_after = df[features].isna().sum().sum()
+        if na_sum_after == na_sum_before:
+            break
 
-    # 3. Для строк с несколькими пробелами (например, 2 и более)
-    for target in features:
-        df_multi_empty = df[
-            df[target].isna() & (df[[f for f in features if f != target]].notnull().sum(axis=1) >= 1)
-        ]
-        if not df_multi_empty.empty:
-            df.loc[df_multi_empty.index, :] = fill_linear_multi_iter(
-                df_multi_empty, target, [f for f in features if f != target]
-            )
-
-    # 4. В конце все оставшиеся пустые ячейки восполняются средними/модой
+    # 3. Финальное заполнение средними/модой
     df = fill_remaining_gaps(df, fill_strategy="mean", cols=features)

@@ -201,10 +201,12 @@ class Lab4App(QMainWindow):
             "Пол", "Год_выдачи_паспорта", "СНИЛС_цифр", "Симптомы_код", "Врач_код",
             "Часы_до_визита", "Анализы_код", "Часы_до_анализа", "Стоимость", "Банк_код"
         ]
+        window = 2
+        n_rounds = 5
         if method_text.startswith("Линейная регрессия"):
-            restored = make_regression_dataset(self.df_na, features, n_rounds=5)
+            restored = make_regression_dataset(self.df_na, features, n_rounds=n_rounds, window=window)
         elif method_text.startswith("Zet-алгоритм"):
-            restored = make_zet_dataset(self.df_na, features, n_rounds=5)
+            restored = make_zet_dataset(self.df_na, features, n_rounds=n_rounds, window=window)
         else:
             restored = self.df_na.copy()
         self.df_restored = restored

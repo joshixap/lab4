@@ -33,7 +33,7 @@ def make_regression_dataset(df, features, n_rounds=5, window=2):
                     df_multi_empty, target, other_feats, window=window
                 )
     # Финальное заполнение средними/модой
-    df_reg = fill_remaining_gaps(df_reg, fill_strategy="mean", cols=features)
+    #df_reg = fill_remaining_gaps(df_reg, fill_strategy="mean", cols=features)
     return df_reg
 
 def make_zet_dataset(df, features, n_rounds=5, window=2):
@@ -66,5 +66,5 @@ if __name__ == "__main__":
     df_regression = make_regression_dataset(df, features, n_rounds=5, window=window)
     df_regression.to_csv("dataset_regression.csv", index=False)
 
-    df_zet = make_zet_dataset(df, features, n_rounds=5, window=window)
+    #df_zet = make_zet_dataset(df, features, n_rounds=5, window=window)
     df_zet.to_csv("dataset_zet.csv", index=False)
