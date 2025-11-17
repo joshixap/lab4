@@ -1,73 +1,53 @@
-import pandas as pd
 import numpy as np
 
-# Параметры алгоритма
-K_INIT = 5                  # начальное число кластеров
-MIN_CLUSTER_SIZE = 100      # минимальное число точек для кластера (иначе удалить)
-P = 2                       # параметр расстояния Минковского (евклидово)
-FEATURES = ['Стоимость', 'Анализы_код', 'Врач_код', 'Симптомы_код']
+# Параметры по умолчанию
+DEFAULT_K_INIT = 5
+DEFAULT_MIN_CLUSTER_SIZE = 100
+DEFAULT_P = 2
 
-# 1. Загрузка данных
-data = pd.read_csv('result.csv')
+def minkowski_dist_matrix(X, centers, p=DEFAULT_P):
+    diffs = np.abs(X[:, None, :] - centers[None, :, :])
+    dists = np.sum(diffs ** p, axis=2)
+    return dists ** (1.0/p)
 
-# Функция расстояния Минковского
-def minkowski_dist(a, b, p=P):
-    return np.power(np.sum(np.abs(a - b) ** p), 1.0/p)
+def assign_clusters_fast(X, centers, p=DEFAULT_P):
+    dists = minkowski_dist_matrix(X, centers, p)
+    return np.argmin(dists, axis=1)
 
-# Инициализация центров (случайный выбор точек)
-np.random.seed(42)
-initial_idxs = np.random.choice(len(data), K_INIT, replace=False)
-centers = data.loc[initial_idxs, FEATURES].to_numpy()
+def update_centers_fast(X, labels, k):
+    return np.array([
+        X[labels == i].mean(axis=0) if np.any(labels == i) else np.zeros(X.shape[1])
+        for i in range(k)
+    ])
 
-def assign_clusters(data, centers):
-    points = data[FEATURES].to_numpy()
-    clusters = []
-    for pt in points:
-        dists = [minkowski_dist(pt, c, P) for c in centers]
-        clusters.append(np.argmin(dists))
-    return np.array(clusters)
-
-def update_centers(data, clusters, k):
-    new_centers = []
-    for idx in range(k):
-        members = data[clusters == idx][FEATURES]
-        if len(members) > 0:
-            new_centers.append(members.mean().to_numpy())
-        else:
-            # "пустой" кластер: просто повторяем центр
-            new_centers.append(np.zeros(len(FEATURES)))
-    return np.array(new_centers)
-
-def cluster_variance(data, clusters, centers):
-    variances = []
-    for idx, center in enumerate(centers):
-        members = data[clusters == idx][FEATURES].to_numpy()
-        if len(members) > 0:
-            var = np.sum([minkowski_dist(pt, center, P)**2 for pt in members])
+def cluster_variance_fast(X, labels, centers, p=DEFAULT_P):
+    vars = []
+    for i, center in enumerate(centers):
+        pts = X[labels == i]
+        if len(pts) > 0:
+            dists = np.sum((pts - center) ** p, axis=1)
+            var = np.sum(dists)
         else:
             var = 0
-        variances.append(var)
-    return variances
+        vars.append(var)
+    return vars
 
-def cluster_distances(centers):
-    # попарные расстояния между центрами
-    dists = []
-    for i in range(len(centers)):
-        for j in range(i+1, len(centers)):
-            dists.append(minkowski_dist(centers[i], centers[j], P))
-    return dists
+def cluster_distances_fast(centers, p=DEFAULT_P):
+    diff = centers[None, :, :] - centers[:, None, :]
+    dists = np.sum(np.abs(diff) ** p, axis=2) ** (1/p)
+    idx = np.triu_indices_from(dists, k=1)
+    return dists[idx]
 
-def most_variant_coord(data, clusters, centers, idx):
-    # Вычисляет номер координаты с максимальной дисперсией в кластере idx
-    members = data[clusters == idx][FEATURES].to_numpy()
-    if len(members) > 1:
-        vars = np.var(members, axis=0)
+def most_variant_coord_fast(X, labels, centers, idx):
+    pts = X[labels == idx]
+    if len(pts) > 1:
+        vars = np.var(pts, axis=0)
         split_dim = np.argmax(vars)
-        return split_dim, np.mean(members[:, split_dim])
+        return split_dim, np.mean(pts[:, split_dim])
     else:
         return 0, centers[idx][0]
 
-def split_cluster(centers, idx, split_dim, split_val):
+def split_cluster_fast(centers, idx, split_dim, split_val):
     center_a = centers[idx].copy()
     center_b = centers[idx].copy()
     delta = 1.0
@@ -77,7 +57,7 @@ def split_cluster(centers, idx, split_dim, split_val):
     centers = np.vstack([centers, center_a, center_b])
     return centers
 
-def merge_clusters(centers, idx_a, idx_b):
+def merge_clusters_fast(centers, idx_a, idx_b):
     merged = (centers[idx_a] + centers[idx_b]) / 2
     mask = np.ones(len(centers), dtype=bool)
     mask[[idx_a, idx_b]] = False
@@ -85,70 +65,81 @@ def merge_clusters(centers, idx_a, idx_b):
     centers = np.vstack([centers, merged])
     return centers
 
-def delete_clusters(data, clusters, centers):
-    valid_idxs = []
-    for idx in range(len(centers)):
-        if np.sum(clusters == idx) >= MIN_CLUSTER_SIZE:
-            valid_idxs.append(idx)
+def delete_clusters_fast(X, labels, centers, min_cluster_size=DEFAULT_MIN_CLUSTER_SIZE):
+    valid_idxs = [i for i in range(len(centers)) if np.sum(labels == i) >= min_cluster_size]
+    if not valid_idxs:
+        return centers, labels
     centers = centers[valid_idxs]
-    mapping = {old:new for new, old in enumerate(valid_idxs)}
-    clusters = np.array([mapping[c] for c in clusters if c in valid_idxs])
-    return centers, clusters
+    mapping = {old: new for new, old in enumerate(valid_idxs)}
+    labels = np.array([mapping[c] for c in labels if c in valid_idxs])
+    return centers, labels
 
-# Основной цикл
-converged = False
-iter_count = 0
+def isodata_clustering(
+    X,
+    k_init=DEFAULT_K_INIT,
+    min_cluster_size=DEFAULT_MIN_CLUSTER_SIZE,
+    p=DEFAULT_P,
+    max_iter=300,
+    split_delta=1.0,
+    random_state=None
+):
+    np.random.seed(random_state if random_state is not None else 42)
+    initial_idxs = np.random.choice(len(X), k_init, replace=False)
+    centers = X[initial_idxs]
+    converged = False
+    iter_count = 0
+    labels = assign_clusters_fast(X, centers, p)
 
-while not converged and iter_count < 100:
-    iter_count += 1
+    while not converged and iter_count < max_iter:
+        iter_count += 1
+        labels = assign_clusters_fast(X, centers, p)
+        new_centers = update_centers_fast(X, labels, len(centers))
+        converged = np.allclose(centers, new_centers)
+        centers = new_centers
 
-    clusters = assign_clusters(data, centers)
-    new_centers = update_centers(data, clusters, len(centers))
-    converged = np.allclose(centers, new_centers)
-    centers = new_centers
+        variances = cluster_variance_fast(X, labels, centers, p)
+        avg_variance = np.mean(variances)
+        split_threshold = 1.2 * avg_variance
 
-    # Вычисление дисперсий и средних расстояний между центрами
-    variances = cluster_variance(data, clusters, centers)
-    avg_variance = np.mean(variances)
-    split_threshold = 1.2 * avg_variance
+        center_dists = cluster_distances_fast(centers, p)
+        avg_center_dist = np.mean(center_dists) if len(center_dists) > 0 else 0
+        merge_threshold = 0.8 * avg_center_dist
 
-    center_dists = cluster_distances(centers)
-    if center_dists:
-        avg_center_dist = np.mean(center_dists)
-    else:
-        avg_center_dist = 0
-    merge_threshold = 0.8 * avg_center_dist
-
-    # SPLIT clusters
-    for idx, var in enumerate(variances):
-        if var > split_threshold:
-            split_dim, split_val = most_variant_coord(data, clusters, centers, idx)
-            centers = split_cluster(centers, idx, split_dim, split_val)
-            converged = False
-            break  # чтобы не split всех сразу
-
-    # MERGE clusters
-    merged = False
-    for i in range(len(centers)):
-        for j in range(i+1, len(centers)):
-            dist = minkowski_dist(centers[i], centers[j], P)
-            if dist < merge_threshold:
-                centers = merge_clusters(centers, i, j)
+        # SPLIT
+        for idx, var in enumerate(variances):
+            if var > split_threshold:
+                split_dim, split_val = most_variant_coord_fast(X, labels, centers, idx)
+                centers = split_cluster_fast(centers, idx, split_dim, split_val)
                 converged = False
-                merged = True
                 break
-        if merged:
-            break
 
-    # DELETE clusters
-    centers, clusters = delete_clusters(data, clusters, centers)
-    # После удаления может поменяться число кластеров!
+        # MERGE
+        merged = False
+        for i in range(len(centers)):
+            for j in range(i + 1, len(centers)):
+                dist = np.linalg.norm(centers[i] - centers[j])
+                if dist < merge_threshold:
+                    centers = merge_clusters_fast(centers, i, j)
+                    converged = False
+                    labels = assign_clusters_fast(X, centers, p)
+                    merged = True
+                    break
+            if merged:
+                break
 
-    # Прекращение при неизменности меток
-    new_clusters = assign_clusters(data, centers)
-    if np.array_equal(clusters, new_clusters):
-        converged = True
+        # DELETE
+        centers, labels = delete_clusters_fast(X, labels, centers, min_cluster_size)
+        new_labels = assign_clusters_fast(X, centers, p)
+        if np.array_equal(labels, new_labels):
+            converged = True
+        labels = new_labels
+    return labels, centers
 
-# Сохраняем результат
-data['Cluster'] = assign_clusters(data, centers)
-data.to_csv('isodata.csv', index=False)
+# Вот так файл будет спокойно импортироваться!
+# Пример использования:
+# import pandas as pd
+# from isodata_fast import isodata_clustering, assign_clusters_fast
+# data = pd.read_csv('result.csv')
+# points = data[FEATURES].values
+# labels, centers = isodata_clustering(points)
+# data['Cluster'] = labels
