@@ -11,7 +11,6 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QTextCursor
 from PyQt5.QtCore import Qt
 
-# Импорт всех функций из ваших файлов!
 from digitization import *
 from isodata import *
 from remove_blocks import *
@@ -29,7 +28,8 @@ class Lab4App(QMainWindow):
         self.df_digitized = pd.DataFrame()
         self.df_isodata = pd.DataFrame()
         self.df_na = pd.DataFrame()
-        self.df_restored = pd.DataFrame()
+        self.df_restored_zet = pd.DataFrame()
+        self.df_restored_regr = pd.DataFrame()
         self.symptoms_csv = []
         self.specialties_csv = []
         self.analyses_csv = []
@@ -39,7 +39,6 @@ class Lab4App(QMainWindow):
     def init_gui(self):
         main_widget = QWidget()
         main_layout = QHBoxLayout()
-
         left_panel = QVBoxLayout()
 
         btn_load = QPushButton("Загрузить CSV")
@@ -58,26 +57,22 @@ class Lab4App(QMainWindow):
         remove_group.setLayout(remove_layout)
         left_panel.addWidget(remove_group)
 
-        restore_group = QGroupBox("Восстановление пропусков")
+        restore_group = QGroupBox("Восстановление пропусков двумя способами")
         restore_layout = QVBoxLayout()
-        self.restore_method_box = QComboBox()
-        self.restore_method_box.addItems([
-            "Линейная регрессия (дозаполнение средним/мединой)",
-            "Zet-алгоритм (дозаполнение средним/мединой)"
-        ])
-        restore_layout.addWidget(QLabel("Метод восстановления:"))
-        restore_layout.addWidget(self.restore_method_box)
-        btn_restore = QPushButton("Восстановить")
-        btn_restore.clicked.connect(self.on_restore)
+        btn_restore = QPushButton("Восстановить (2 способами)")
+        btn_restore.clicked.connect(self.on_restore_dual)
         restore_layout.addWidget(btn_restore)
         restore_group.setLayout(restore_layout)
         left_panel.addWidget(restore_group)
 
         isodata_group = QGroupBox("ISODATA-кластеризация")
         isodata_layout = QVBoxLayout()
-        btn_isodata = QPushButton("Применить ISODATA")
-        btn_isodata.clicked.connect(self.on_isodata)
+        btn_isodata = QPushButton("Применить ISODATA (на Zet)")
+        btn_isodata.clicked.connect(self.on_isodata_zet)
         isodata_layout.addWidget(btn_isodata)
+        btn_isodata2 = QPushButton("Применить ISODATA (на Регрессия)")
+        btn_isodata2.clicked.connect(self.on_isodata_regr)
+        isodata_layout.addWidget(btn_isodata2)
         isodata_group.setLayout(isodata_layout)
         left_panel.addWidget(isodata_group)
 
@@ -96,8 +91,10 @@ class Lab4App(QMainWindow):
         self.tabs.addTab(self.table_digitized, "Цифровой")
         self.table_na = QTableWidget()
         self.tabs.addTab(self.table_na, "После удаления")
-        self.table_restored = QTableWidget()
-        self.tabs.addTab(self.table_restored, "Восстановленный")
+        self.table_restored_zet = QTableWidget()
+        self.tabs.addTab(self.table_restored_zet, "Восстановленный Zet")
+        self.table_restored_regr = QTableWidget()
+        self.tabs.addTab(self.table_restored_regr, "Восстановленный Регрессия")
         self.table_isodata = QTableWidget()
         self.tabs.addTab(self.table_isodata, "ISODATA")
         self.compact_box = QTextEdit()
@@ -168,14 +165,16 @@ class Lab4App(QMainWindow):
                 self.df_loaded, self.symptoms_csv, self.specialties_csv, self.analyses_csv
             )
             self.df_na = pd.DataFrame()
-            self.df_restored = pd.DataFrame()
+            self.df_restored_zet = pd.DataFrame()
+            self.df_restored_regr = pd.DataFrame()
             self.df_isodata = pd.DataFrame()
             self._show_df(self.table_loaded, self.df_loaded)
             self._show_df(self.table_digitized, self.df_digitized)
             self.log_stat("Загружен исходный датасет:\n" + self._basic_stats(self.df_loaded))
             self.compact_box.setText("")
             self._show_df(self.table_na, pd.DataFrame())
-            self._show_df(self.table_restored, pd.DataFrame())
+            self._show_df(self.table_restored_zet, pd.DataFrame())
+            self._show_df(self.table_restored_regr, pd.DataFrame())
             self._show_df(self.table_isodata, pd.DataFrame())
 
     def on_remove_blocks(self):
@@ -188,37 +187,72 @@ class Lab4App(QMainWindow):
         self.df_na = df_na
         self._show_df(self.table_na, self.df_na)
         self.log_stat(f"Удалены блоки пропусков ({percent}%):\n" + self._basic_stats(self.df_na))
-        self.df_restored = pd.DataFrame()
-        self._show_df(self.table_restored, pd.DataFrame())
+        self.df_restored_zet = pd.DataFrame()
+        self.df_restored_regr = pd.DataFrame()
+        self._show_df(self.table_restored_zet, pd.DataFrame())
+        self._show_df(self.table_restored_regr, pd.DataFrame())
         self._show_df(self.table_isodata, pd.DataFrame())
         self.compact_box.setText("")
 
-    def on_restore(self):
+    def on_restore_dual(self):
         if self.df_na.empty:
             return
-        method_text = self.restore_method_box.currentText()
         features = [
             "Пол", "Год_выдачи_паспорта", "СНИЛС_цифр", "Симптомы_код", "Врач_код",
             "Часы_до_визита", "Анализы_код", "Часы_до_анализа", "Стоимость", "Банк_код"
         ]
         window = 2
-        n_rounds = 5
-        if method_text.startswith("Линейная регрессия"):
-            restored = make_regression_dataset(self.df_na, features, n_rounds=n_rounds, window=window)
-        elif method_text.startswith("Zet-алгоритм"):
-            restored = make_zet_dataset(self.df_na, features, n_rounds=n_rounds, window=window)
-        else:
-            restored = self.df_na.copy()
-        self.df_restored = restored
-        self._show_df(self.table_restored, self.df_restored)
-        self.log_stat("Восстановленный датасет:\n" + self._basic_stats(self.df_restored))
+        min_filled = 1
+        min_neighbors = 1
+        n_rounds = 20
+
+        # Zet recovery
+        restored_zet = self.df_na.copy()
+        for _ in range(n_rounds):
+            changed_any = False
+            for col in features:
+                restored_zet, changed = zet_fill_window(restored_zet, col, window=window, min_neighbors=min_neighbors)
+                changed_any = changed_any or changed
+            if not changed_any:
+                break
+        restored_zet = fill_remaining_gaps(restored_zet, fill_strategy="ffill", cols=features)
+        self.df_restored_zet = restored_zet
+
+        # Linear regression recovery
+        restored_regr = self.df_na.copy()
+        for _ in range(n_rounds):
+            na_sum_before = restored_regr[features].isna().sum().sum()
+            for target in features:
+                other_feats = [f for f in features if f != target]
+                restored_regr = fill_linear_window_multi_iter(restored_regr, target, other_feats, window=window, min_filled=min_filled)
+            na_sum_after = restored_regr[features].isna().sum().sum()
+            if na_sum_after == na_sum_before:
+                break
+        restored_regr = fill_remaining_gaps(restored_regr, fill_strategy="ffill", cols=features)
+        self.df_restored_regr = restored_regr
+
+        self._show_df(self.table_restored_zet, self.df_restored_zet)
+        self._show_df(self.table_restored_regr, self.df_restored_regr)
+        self.log_stat("Восстановленные датасеты (Zet и Регрессия):\n"
+            + "Zet: " + self._basic_stats(self.df_restored_zet) + "\n\n"
+            + "Регрессия: " + self._basic_stats(self.df_restored_regr)
+        )
         self._show_df(self.table_isodata, pd.DataFrame())
         self.compact_box.setText("")
 
-    def on_isodata(self):
-        if self.df_restored.empty:
+    def on_isodata_zet(self):
+        if self.df_restored_zet.empty:
+            self.compact_box.setText("Нет восстановленного Zet датасета.")
             return
-        df_for_iso = self.df_restored.copy()
+        self._run_isodata_on(self.df_restored_zet)
+
+    def on_isodata_regr(self):
+        if self.df_restored_regr.empty:
+            self.compact_box.setText("Нет восстановленного Регрессия датасета.")
+            return
+        self._run_isodata_on(self.df_restored_regr)
+
+    def _run_isodata_on(self, df_for_iso):
         FEATURES = [
             "Стоимость", "Анализы_код", "Врач_код", "Симптомы_код"
         ]
@@ -227,7 +261,7 @@ class Lab4App(QMainWindow):
             self.compact_box.setText("Данных для кластеризации недостаточно.")
             return
 
-        # Быстрая ISODATA с новыми функциями!
+        # Быстрая ISODATA
         K_INIT = 5
         P = 2
         np.random.seed(42)
@@ -238,13 +272,11 @@ class Lab4App(QMainWindow):
         converged, iter_count = False, 0
         while not converged and iter_count < 100:
             iter_count += 1
-            # Merging (используйте minkowski_dist или клид для расстояния между центрами)
             center_dists = []
             for i in range(len(centers)):
                 for j in range(i + 1, len(centers)):
                     dist = minkowski_dist(centers[i], centers[j], P)
                     center_dists.append(dist)
-                    # Для merge используем быструю функцию, по примеру
                     merge_threshold = 0.8 * np.mean(center_dists) if center_dists else 0
                     if dist < merge_threshold:
                         centers = merge_clusters_fast(centers, i, j)
@@ -254,15 +286,13 @@ class Lab4App(QMainWindow):
                 else:
                     continue
                 break
-
-            # Splitting/other heuristics, если нужны (можете доработать)
-            # Удаляем лишние кластеры
             centers, labels = delete_clusters_fast(points, labels, centers)
             new_labels = assign_clusters_fast(points, centers)
             if np.array_equal(labels, new_labels):
                 converged = True
             labels = new_labels
 
+        df_for_iso = df_for_iso.copy()
         df_for_iso['Cluster'] = labels
         self.df_isodata = df_for_iso
         self._show_df(self.table_isodata, self.df_isodata)
