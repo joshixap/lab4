@@ -113,8 +113,8 @@ if __name__ == "__main__":
     ]
     window = 2
     min_neighbors = 1
-    min_filled = 5
-    n_rounds = 10
+    min_filled = 1
+    n_rounds = 20
 
     # 1. Zet-алгоритм для всех признаков сразу (итеративно, только na!)
     for _ in range(n_rounds):
