@@ -6,46 +6,36 @@ from missing_fill_methods import (
     fill_remaining_gaps
 )
 
-def make_regression_dataset(df, features, n_rounds=5, window=2):
+def make_regression_dataset(df, features, n_rounds=5, window=2, min_filled=5):
     """
-    Восстанавливает пропуски МАКСИМАЛЬНО регрессией с учетом ±window соседей, затем дополняет средними.
-    Проходит несколько итераций, чтобы новые значения могли помочь заполнить больше.
+    Восстанавливает пропуски итеративно регрессией с учетом ±window соседей.
     """
     df_reg = df.copy()
-    for r in range(n_rounds):
-        # Сначала строки с одним пробелом
+    for _ in range(n_rounds):
+        na_sum_before = df_reg[features].isna().sum().sum()
         for target in features:
             other_feats = [f for f in features if f != target]
-            df_one_empty = df_reg[df_reg[target].isna() & df_reg[other_feats].notnull().all(axis=1)]
-            if not df_one_empty.empty:
-                df_reg.loc[df_one_empty.index, :] = fill_linear_window_multi_iter(
-                    df_one_empty, target, other_feats, window=window
-                )
-        # Затем строки с несколькими пробелами
-        for target in features:
-            other_feats = [f for f in features if f != target]
-            # Есть хотя бы один заполненный признак
-            df_multi_empty = df_reg[
-                df_reg[target].isna() & (df_reg[other_feats].notnull().sum(axis=1) >= 1)
-            ]
-            if not df_multi_empty.empty:
-                df_reg.loc[df_multi_empty.index, :] = fill_linear_window_multi_iter(
-                    df_multi_empty, target, other_feats, window=window
-                )
-    # Финальное заполнение средними/модой
+            # <<< ВАЖНО! Это обновляет всю таблицу каждый раз, не одну колонку >>>
+            df_reg = fill_linear_window_multi_iter(df_reg, target, other_feats, window=window, min_filled=min_filled)
+        na_sum_after = df_reg[features].isna().sum().sum()
+        if na_sum_after == na_sum_before:
+            break
     #df_reg = fill_remaining_gaps(df_reg, fill_strategy="mean", cols=features)
     return df_reg
 
-def make_zet_dataset(df, features, n_rounds=5, window=2):
+def make_zet_dataset(df, features, n_rounds=5, window=2, min_neighbors=1):
     """
-    Восстанавливает пропуски МАКСИМАЛЬНО zet-алгоритмом с учетом ±window соседей, затем дополняет средними.
-    Проходит несколько итераций, чтобы новые значения могли помочь заполнить больше.
+    Восстанавливает пропуски итеративно zet-алгоритмом с учетом ±window соседей.
     """
     df_zet = df.copy()
-    for r in range(n_rounds):
+    for _ in range(n_rounds):
+        changed_any = False
         for col in features:
-            df_zet = zet_fill_window(df_zet, col, window=window)
-    df_zet = fill_remaining_gaps(df_zet, fill_strategy="mean", cols=features)
+            df_zet, changed = zet_fill_window(df_zet, col, window=window, min_neighbors=min_neighbors)
+            changed_any = changed_any or changed
+        if not changed_any:
+            break
+    #df_zet = fill_remaining_gaps(df_zet, fill_strategy="mean", cols=features)
     return df_zet
 
 if __name__ == "__main__":
@@ -63,8 +53,10 @@ if __name__ == "__main__":
         "Банк_код"
     ]
     window = 2
-    df_regression = make_regression_dataset(df, features, n_rounds=5, window=window)
+    min_filled = 1
+    min_neighbors = 1
+    df_regression = make_regression_dataset(df, features, n_rounds=5, window=window, min_filled=min_filled)
     df_regression.to_csv("dataset_regression.csv", index=False)
 
-    #df_zet = make_zet_dataset(df, features, n_rounds=5, window=window)
+    df_zet = make_zet_dataset(df, features, n_rounds=5, window=window, min_neighbors=min_neighbors)
     df_zet.to_csv("dataset_zet.csv", index=False)

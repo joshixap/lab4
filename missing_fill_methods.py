@@ -20,7 +20,7 @@ def zet_fill_window(df, col, window=2, min_neighbors=1):
     n = len(arr)
     changed = False
     for i in range(n):
-        if pd.isnull(arr[i]):
+        if pd.isnull(arr[i]):  # Only fill nan cells!
             neighbors = neighbors_window(arr, i, window=window)
             if len(neighbors) >= min_neighbors:
                 if is_numtype:
@@ -30,7 +30,7 @@ def zet_fill_window(df, col, window=2, min_neighbors=1):
                     arr[i] = mode.iloc[0] if not mode.empty else neighbors[0]
                 changed = True
     df[col] = arr
-    return df, changed  # return also "changed"!
+    return df, changed
 
 def add_window_features(df, col, window=2):
     feats = pd.DataFrame(index=df.index)
@@ -66,10 +66,13 @@ def fill_linear_window_multi_iter(df, target_col, feature_cols, window=2, min_fi
         X_missing = full_features.loc[mask_missing]
         X_missing = X_missing.fillna(X_train.mean())
         new_values = model.predict(X_missing)
-        # set only those that are still missing!
-        df.loc[mask_missing.index, target_col] = new_values
+
+        # Only assign to missing (NaN) values!
+        for idx, value in zip(mask_missing.index, new_values):
+            if pd.isnull(df.at[idx, target_col]):
+                df.at[idx, target_col] = value
+
         na_after = df[target_col].isna().sum()
-        # if nothing changed, exit
         if na_after == na_before:
             break
     return df
@@ -79,7 +82,9 @@ def fill_remaining_gaps(df, fill_strategy="mean", cols=None):
     if cols is None:
         cols = df.columns
     for col in cols:
-        if df[col].isna().sum() == 0:
+        # Only fill missing cells (keep already filled as-is)
+        is_na = df[col].isna()
+        if is_na.sum() == 0:
             continue
         is_numtype = pd.api.types.is_numeric_dtype(df[col])
         if is_numtype and fill_strategy == "mean":
@@ -89,7 +94,7 @@ def fill_remaining_gaps(df, fill_strategy="mean", cols=None):
         else:
             mode = df[col].dropna().mode()
             fill_value = mode[0] if not mode.empty else None
-        df[col] = df[col].fillna(fill_value)
+        df.loc[is_na, col] = fill_value
     return df
 
 if __name__ == "__main__":
@@ -111,7 +116,7 @@ if __name__ == "__main__":
     min_filled = 5
     n_rounds = 10
 
-    # 1. Zet-алгоритм для всех признаков сразу (итеративно)
+    # 1. Zet-алгоритм для всех признаков сразу (итеративно, только na!)
     for _ in range(n_rounds):
         changed_any = False
         for col in features:
@@ -120,17 +125,15 @@ if __name__ == "__main__":
         if not changed_any:
             break
 
-    # 2. Регрессия для всех признаков по всему df, а не по подмножеству!
+    # 2. Регрессия для всех признаков по всему df, а не по подмножеству! (только na!)
     for _ in range(n_rounds):
-        changed_any = False
         na_sum_before = df[features].isna().sum().sum()
         for target in features:
             other_feats = [f for f in features if f != target]
-            df2 = fill_linear_window_multi_iter(df, target, other_feats, window=window, min_filled=min_filled)
-            df[target] = df2[target]
+            df = fill_linear_window_multi_iter(df, target, other_feats, window=window, min_filled=min_filled)
         na_sum_after = df[features].isna().sum().sum()
         if na_sum_after == na_sum_before:
             break
 
-    # 3. Финальное заполнение средними/модой
+    # 3. Финальное заполнение средними/модой (только на na!)
     df = fill_remaining_gaps(df, fill_strategy="mean", cols=features)
