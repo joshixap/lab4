@@ -18,12 +18,19 @@ from missing_fill_methods import *
 from make_full_datasets import *
 from compactness import *
 
+METRICS = [
+    ("mean", np.mean),
+    ("median", np.median),
+    ("std", np.std)
+]
+
 class Lab4App(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Восстановление и анализ датасета - lab4")
-        self.resize(1200, 700)
+        self.resize(1300, 750)
 
+        # Датасеты для работы
         self.df_loaded = pd.DataFrame()
         self.df_digitized = pd.DataFrame()
         self.df_isodata = pd.DataFrame()
@@ -76,6 +83,10 @@ class Lab4App(QMainWindow):
         isodata_group.setLayout(isodata_layout)
         left_panel.addWidget(isodata_group)
 
+        btn_report = QPushButton("Сформировать отчет")
+        btn_report.clicked.connect(self.show_report)
+        left_panel.addWidget(btn_report)
+
         left_panel.addStretch()
 
         self.stat_box = QTextEdit()
@@ -100,6 +111,10 @@ class Lab4App(QMainWindow):
         self.compact_box = QTextEdit()
         self.compact_box.setReadOnly(True)
         self.tabs.addTab(self.compact_box, "Компактность кластеров")
+
+        # Новая вкладка для отчета
+        self.table_report = QTableWidget()
+        self.tabs.addTab(self.table_report, "Отчет")
 
         main_layout.addLayout(left_panel, 1)
         main_layout.addWidget(self.tabs, 3)
@@ -176,6 +191,7 @@ class Lab4App(QMainWindow):
             self._show_df(self.table_restored_zet, pd.DataFrame())
             self._show_df(self.table_restored_regr, pd.DataFrame())
             self._show_df(self.table_isodata, pd.DataFrame())
+            self.table_report.clear()
 
     def on_remove_blocks(self):
         if self.df_digitized.empty:
@@ -193,14 +209,12 @@ class Lab4App(QMainWindow):
         self._show_df(self.table_restored_regr, pd.DataFrame())
         self._show_df(self.table_isodata, pd.DataFrame())
         self.compact_box.setText("")
+        self.table_report.clear()
 
     def on_restore_dual(self):
         if self.df_na.empty:
             return
-        features = [
-            "Пол", "Год_выдачи_паспорта", "СНИЛС_цифр", "Симптомы_код", "Врач_код",
-            "Часы_до_визита", "Анализы_код", "Часы_до_анализа", "Стоимость", "Банк_код"
-        ]
+        features = [c for c in self.df_digitized.select_dtypes(include=["number"]).columns]
         window = 2
         min_filled = 1
         min_neighbors = 1
@@ -239,6 +253,7 @@ class Lab4App(QMainWindow):
         )
         self._show_df(self.table_isodata, pd.DataFrame())
         self.compact_box.setText("")
+        self.table_report.clear()
 
     def on_isodata_zet(self):
         if self.df_restored_zet.empty:
@@ -323,6 +338,109 @@ class Lab4App(QMainWindow):
         compactness_avg = total_ssd / total_pts if total_pts > 0 else 0
         txt += f"\nСредняя компактность кластеризации: {compactness_avg:.2f}\n"
         return txt
+
+    def show_report(self):
+        # Проверяем, что все датасеты сформированы
+        if (
+            self.df_digitized.empty or self.df_na.empty
+            or self.df_restored_zet.empty or self.df_restored_regr.empty
+        ):
+            self.log_stat("Для формирования отчета нужны все датасеты!")
+            return
+
+        numeric_cols = [c for c in self.df_digitized.select_dtypes(include=["number"]).columns]
+
+        # Собираем метрики для всех датасетов
+        results = []
+        for col in numeric_cols:
+            orig = self.df_digitized[col].dropna()
+            hole = self.df_na[col].dropna()
+            zet = self.df_restored_zet[col].dropna()
+            regr = self.df_restored_regr[col].dropna()
+            row = [col]
+            for metric_name, metric_fun in METRICS:
+                # Везде считаем метрику
+                m_orig = metric_fun(orig) if len(orig) > 0 else np.nan
+                m_hole = metric_fun(hole) if len(hole) > 0 else np.nan
+                m_zet = metric_fun(zet) if len(zet) > 0 else np.nan
+                m_regr = metric_fun(regr) if len(regr) > 0 else np.nan
+                # Считаем ошибки по формуле Δ
+                err_hole = abs(m_orig - m_hole) / abs(m_orig) * 100 if m_orig != 0 and not np.isnan(m_hole) else 0
+                err_zet = abs(m_orig - m_zet) / abs(m_orig) * 100 if m_orig != 0 and not np.isnan(m_zet) else 0
+                err_regr = abs(m_orig - m_regr) / abs(m_orig) * 100 if m_orig != 0 and not np.isnan(m_regr) else 0
+                row += [
+                    f"{m_orig:.3f}", f"{m_hole:.3f}", f"{m_zet:.3f}", f"{m_regr:.3f}",
+                    f"{err_hole:.2f}", f"{err_zet:.2f}", f"{err_regr:.2f}"
+                ]
+            results.append(row)
+
+        # Суммарная ошибка по каждому методу (по всем метрикам и столбцам)
+        sum_err_zet = 0
+        sum_err_regr = 0
+        metric_err_zet = []
+        metric_err_regr = []
+        for row in results:
+            # В каждой строке есть сдвиг для каждой метрики
+            # Δ по Z = индексы 7, 7+7 и пр. Δ по Рег = индексы 8, 8+7 и пр.
+            for i in range(len(METRICS)):
+                sum_err_zet += float(row[6 + i * 7])
+                sum_err_regr += float(row[7 + i * 7])
+                metric_err_zet.append(float(row[6 + i * 7]))
+                metric_err_regr.append(float(row[7 + i * 7]))
+
+        # Выбор лучшего метода
+        best_method = None
+        if sum_err_zet < sum_err_regr:
+            best_method = "Zet"
+        else:
+            best_method = "Регрессия"
+
+        # Формирование таблицы отчета
+        n_metrics = len(METRICS)
+        col_headers = ["Признак",]
+        for metric_name, _ in METRICS:
+            col_headers += [
+                f"{metric_name}-оригинал",
+                f"{metric_name}-дырявый",
+                f"{metric_name}-Zet",
+                f"{metric_name}-Регрессия",
+                f"Δ {metric_name}-дыр.",
+                f"Δ {metric_name}-Zet",
+                f"Δ {metric_name}-Регрессия"
+            ]
+        self.table_report.clear()
+        self.table_report.setColumnCount(len(col_headers))
+        self.table_report.setRowCount(len(results) + 2)
+        self.table_report.setHorizontalHeaderLabels(col_headers)
+
+        for i, row in enumerate(results):
+            for j, val in enumerate(row):
+                item = QTableWidgetItem(val)
+                # Подсветить лучший Δ по минимальному значению (кроме дырявого)
+                if j % 7 in (5,6):  # Δ Zet/Reg
+                    if best_method == "Zet" and j % 7 == 5:
+                        item.setBackground(Qt.yellow)
+                    if best_method == "Регрессия" and j % 7 == 6:
+                        item.setBackground(Qt.yellow)
+                self.table_report.setItem(i, j, item)
+
+        # Итоговые строки
+        avg_err_zet = sum_err_zet / (len(results)*n_metrics) if (len(results)*n_metrics) > 0 else 0
+        avg_err_regr = sum_err_regr / (len(results)*n_metrics) if (len(results)*n_metrics) > 0 else 0
+        self.table_report.setItem(len(results), 0, QTableWidgetItem("Суммарная Δ Zet"))
+        self.table_report.setItem(len(results), 5, QTableWidgetItem(f"{sum_err_zet:.2f}"))
+        self.table_report.setItem(len(results), 6, QTableWidgetItem(f"{avg_err_zet:.2f}"))
+        self.table_report.setItem(len(results)+1, 0, QTableWidgetItem("Суммарная Δ Регрессия"))
+        self.table_report.setItem(len(results)+1, 6, QTableWidgetItem(f"{sum_err_regr:.2f}"))
+        self.table_report.setItem(len(results)+1, 7, QTableWidgetItem(f"{avg_err_regr:.2f}"))
+
+        for idx in [len(results), len(results)+1]:
+            for color_col, check_method in [(5, "Zet"), (7, "Регрессия")]:
+                if best_method == check_method:
+                    item = self.table_report.item(idx, color_col)
+                    if item: item.setBackground(Qt.yellow)
+        self.tabs.setCurrentWidget(self.table_report)
+        self.log_stat(f"Отчет сформирован. Наиболее эффективный метод заполнения пропусков: {best_method}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
