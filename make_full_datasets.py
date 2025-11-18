@@ -126,4 +126,9 @@ if __name__ == "__main__":
     # 3. Финальное заполнение средними/модой ВСЕХ ячеек
     df = fill_remaining_gaps(df, fill_strategy="mean", cols=features)
 
+    for col in features:
+        # только если колонка числовая и имеет дробные значения
+        if pd.api.types.is_float_dtype(df[col]):
+            df[col] = np.ceil(df[col]).astype(int)
+
     df.to_csv("isodata_filled.csv", index=False)
