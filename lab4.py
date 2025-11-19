@@ -2,6 +2,10 @@ import sys
 import pandas as pd
 import numpy as np
 
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+
 from PyQt5 import QtWidgets
 from PyQt5.QtWidgets import (
     QMainWindow, QApplication, QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QLabel,
@@ -18,11 +22,6 @@ from missing_fill_methods import *
 from make_full_datasets import *
 from compactness import *
 
-METRICS = [
-    ("mean", np.mean),
-    ("median", np.median),
-    ("std", np.std)
-]
 
 def ceil_numeric_df(df, features):
     df = df.copy()
@@ -366,7 +365,6 @@ class Lab4App(QMainWindow):
 
         def sum_relative_error(true, pred):
             mask = (~pd.isna(true)) & (~pd.isna(pred)) & (true != 0)
-            # Формула: Сумма (|истинное - восстановленное| / |истинное|) * 100%
             errors = np.abs(pred[mask] - true[mask]) / np.abs(true[mask])
             return errors.sum() * 100
 
@@ -377,7 +375,6 @@ class Lab4App(QMainWindow):
             gap = self.df_na[col].dropna()
             zet = self.df_restored_zet[col].dropna()
             regr = self.df_restored_regr[col].dropna()
-            # Простое описание по каждому датасету
             mean_vals = [
                 np.mean(orig) if len(orig) else np.nan,
                 np.mean(gap) if len(gap) else np.nan,
@@ -396,14 +393,12 @@ class Lab4App(QMainWindow):
                 mode_safe(zet),
                 mode_safe(regr)
             ]
-            # По картинке: Δ для Zet и Регрессии
-            # Δ считать только по восстанавливаемым элементам!
-            # gap как "дыра", zet и regr как импьютация
-            # Сравнение "оригинал" vs "zet"/"regr" по ИМЕННО тем местам, где были пропуски
             missing_mask = self.df_na[col].isna()
             true_missing = self.df_digitized[col][missing_mask]
+            gap_missing = self.df_na[col][missing_mask].fillna(0)
             zet_missing = self.df_restored_zet[col][missing_mask]
             regr_missing = self.df_restored_regr[col][missing_mask]
+            delta_gap = sum_relative_error(true_missing, gap_missing)
             delta_zet = sum_relative_error(true_missing, zet_missing)
             delta_regr = sum_relative_error(true_missing, regr_missing)
 
@@ -412,16 +407,15 @@ class Lab4App(QMainWindow):
                 [f"{mean_vals[0]:.3f}", f"{mean_vals[1]:.3f}", f"{mean_vals[2]:.3f}", f"{mean_vals[3]:.3f}"] +
                 [f"{median_vals[0]:.3f}", f"{median_vals[1]:.3f}", f"{median_vals[2]:.3f}", f"{median_vals[3]:.3f}"] +
                 [str(mode_vals[0]), str(mode_vals[1]), str(mode_vals[2]), str(mode_vals[3])] +
-                [f"{delta_zet:.2f}", f"{delta_regr:.2f}"]
+                [f"{delta_gap:.2f}", f"{delta_zet:.2f}", f"{delta_regr:.2f}"]
             )
 
-        # Отчет по столбцам:
         col_headers = [
             "Признак",
             "mean-оригинал", "mean-с пропусками", "mean-Zet", "mean-Регрессия",
             "median-оригинал", "median-с пропусками", "median-Zet", "median-Регрессия",
             "mode-оригинал", "mode-с пропусками", "mode-Zet", "mode-Регрессия",
-            "Суммарная Δ Zet (%)", "Суммарная Δ Регрессия (%)"
+            "Суммарная Δ c пропусками (%)", "Суммарная Δ Zet (%)", "Суммарная Δ Регрессия (%)"
         ]
         self.table_report.clear()
         self.table_report.setColumnCount(len(col_headers))
@@ -432,17 +426,60 @@ class Lab4App(QMainWindow):
             for j, val in enumerate(row):
                 self.table_report.setItem(i, j, QTableWidgetItem(val))
 
-        # Суммарная по всем признакам Δ
+        total_gap = sum(float(row[-3]) for row in results)
         total_zet = sum(float(row[-2]) for row in results)
         total_regr = sum(float(row[-1]) for row in results)
         self.table_report.setItem(len(results), 0, QTableWidgetItem("ИТОГ: Суммарная Δ (%)"))
+        self.table_report.setItem(len(results), len(col_headers)-3, QTableWidgetItem(f"{total_gap:.2f}"))
         self.table_report.setItem(len(results), len(col_headers)-2, QTableWidgetItem(f"{total_zet:.2f}"))
         self.table_report.setItem(len(results), len(col_headers)-1, QTableWidgetItem(f"{total_regr:.2f}"))
 
-        best_method = "Zet" if total_zet < total_regr else "Регрессия"
+        best = min((total_gap, "Пропуски"), (total_zet, "Zet"), (total_regr, "Регрессия"), key=lambda x: x[0])[1]
         self.tabs.setCurrentWidget(self.table_report)
-        self.log_stat(f"Отчет сформирован. Наиболее эффективный метод заполнения пропусков: {best_method}")
-   
+        self.log_stat(f"Отчет сформирован. Наиболее эффективный метод заполнения пропусков: {best}")
+
+        # --- PCA графики ---
+        def clear_layout(layout):
+            while layout.count():
+                item = layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+
+        if not hasattr(self, "pca_panel"):
+            self.pca_panel = QWidget()
+            self.pca_layout = QHBoxLayout()
+            self.pca_panel.setLayout(self.pca_layout)
+            self.tabs.addTab(self.pca_panel, "PCA-графики")
+
+        clear_layout(self.pca_layout)
+
+        datasets = [
+            ("Оригинал", self.df_digitized),
+            ("С пропусками", self.df_na.fillna(0)),
+            ("Zet", self.df_restored_zet),
+            ("Регрессия", self.df_restored_regr)
+        ]
+        for name, df in datasets:
+            subset = df[numeric_cols].dropna()
+            if subset.shape[1] < 2 or subset.shape[0] < 2:
+                continue
+            pca = PCA(n_components=2)
+            try:
+                X_pca = pca.fit_transform(subset)
+            except Exception:
+                continue
+            fig, ax = plt.subplots(figsize=(4,4))
+            ax.scatter(X_pca[:,0], X_pca[:,1], s=10, alpha=0.6)
+            ax.set_title(f"PCA: {name}")
+            ax.set_xlabel("PC1")
+            ax.set_ylabel("PC2")
+            canvas = FigureCanvas(fig)
+            self.pca_layout.addWidget(canvas)
+            plt.close(fig)
+
+        self.tabs.setCurrentWidget(self.pca_panel)
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     gui = Lab4App()
